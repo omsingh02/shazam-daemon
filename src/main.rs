@@ -216,7 +216,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // Register D-Bus MPRIS server
     let player_service = ShazamPlayer::new(is_listening.clone(), current_song.clone());
-    let _dbus_conn = Builder::session()?
+    let dbus_conn = Builder::session()?
         .name("org.mpris.MediaPlayer2.Shazam")?
         .serve_at("/org/mpris/MediaPlayer2", ShazamRoot)?
         .serve_at("/org/mpris/MediaPlayer2", player_service)?
@@ -258,6 +258,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     *current_song.write().await = None;
                     emit_paused();
                 }
+
+                if let Ok(iface_ref) = dbus_conn.object_server().interface::<_, ShazamPlayer>("/org/mpris/MediaPlayer2").await {
+                    let _ = iface_ref.get().await.playback_status_changed(iface_ref.signal_emitter()).await;
+                    let _ = iface_ref.get().await.metadata_changed(iface_ref.signal_emitter()).await;
+                }
             }
             _ = sigterm.recv() => {
                 break;
@@ -294,6 +299,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             emit_found(&song);
                             let _ = fs::write(CURRENT_FILE, format!("{} - {}", song.title, song.artist));
                             *current_song.write().await = Some(song);
+
+                            if let Ok(iface_ref) = dbus_conn.object_server().interface::<_, ShazamPlayer>("/org/mpris/MediaPlayer2").await {
+                                let _ = iface_ref.get().await.metadata_changed(iface_ref.signal_emitter()).await;
+                                let _ = iface_ref.get().await.playback_status_changed(iface_ref.signal_emitter()).await;
+                            }
                         }
 
                         audio_capture.clear_buffer().await;
@@ -306,6 +316,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             *current_song.write().await = None;
                             let _ = fs::remove_file(CURRENT_FILE);
                             emit_listening();
+
+                            if let Ok(iface_ref) = dbus_conn.object_server().interface::<_, ShazamPlayer>("/org/mpris/MediaPlayer2").await {
+                                let _ = iface_ref.get().await.metadata_changed(iface_ref.signal_emitter()).await;
+                            }
                         }
                     }
                     Err(_) => {

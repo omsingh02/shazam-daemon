@@ -16,7 +16,7 @@ use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::RwLock;
 use zbus::connection::Builder;
 
-use crate::audio::{AudioCapture, AudioResampler, AudioSourceMode, SilenceDetector};
+use crate::audio::{AudioCapture, AudioSourceMode};
 use crate::downloader::JioSaavnDownloader;
 use crate::dsp::SignatureGenerator;
 use crate::history::HistoryStorage;
@@ -53,10 +53,14 @@ struct Cli {
 fn read_pid() -> Option<i32> {
     if Path::new(PID_FILE).exists() {
         let content = fs::read_to_string(PID_FILE).ok()?;
-        content.trim().parse::<i32>().ok()
-    } else {
-        None
+        if let Ok(pid) = content.trim().parse::<i32>() {
+            // Verify process is actually running in OS
+            if unsafe { libc::kill(pid, 0) == 0 } {
+                return Some(pid);
+            }
+        }
     }
+    None
 }
 
 fn write_pid() {
@@ -200,12 +204,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         _ => AudioSourceMode::Auto,
     };
 
-    let mut audio_capture = AudioCapture::new(source_mode)?;
-    let silence_detector = SilenceDetector::new(-45.0);
+    let audio_capture = AudioCapture::new(source_mode)?;
+    let sig_gen = SignatureGenerator::new();
     let shazam_client = ShazamClient::new();
     let history_storage = HistoryStorage::new();
 
-    let is_listening = Arc::new(AtomicBool::new(false)); // Start paused
+    let is_listening = Arc::new(AtomicBool::new(true)); // Start active listening immediately
     let current_song = Arc::new(RwLock::new(None::<RecognizedSong>));
 
     // Register D-Bus MPRIS server
@@ -222,9 +226,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
 
-    emit_paused();
+    emit_listening();
 
-    let mut sample_accumulator: Vec<f32> = Vec::with_capacity(48000 * 12);
     let mut last_detected_id = String::new();
     let mut miss_count = 0;
 
@@ -238,13 +241,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 is_listening.store(new_state, Ordering::Relaxed);
 
                 if new_state {
-                    sample_accumulator.clear();
+                    audio_capture.clear_buffer().await;
                     last_detected_id.clear();
                     audio_capture.resume();
                     emit_listening();
                 } else {
                     audio_capture.pause();
-                    sample_accumulator.clear();
+                    audio_capture.clear_buffer().await;
                     last_detected_id.clear();
                     *current_song.write().await = None;
                     let _ = fs::remove_file(CURRENT_FILE);
@@ -257,74 +260,53 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             _ = sigint.recv() => {
                 break;
             }
-            _ = tokio::time::sleep(Duration::from_millis(300)) => {
+            _ = tokio::time::sleep(Duration::from_millis(1000)) => {
                 if !is_listening.load(Ordering::Relaxed) {
                     continue;
                 }
 
-                // Drain newly captured audio samples from ring buffer
-                let new_samples = audio_capture.read_available();
-                sample_accumulator.extend_from_slice(&new_samples);
-
-                // Cap rolling buffer at max 12 seconds
-                let max_hw_samples = (audio_capture.sample_rate as usize) * (audio_capture.channels as usize) * 12;
-                if sample_accumulator.len() > max_hw_samples {
-                    let excess = sample_accumulator.len() - max_hw_samples;
-                    sample_accumulator.drain(0..excess);
-                }
-
-                // Check duration in 16 kHz equivalent seconds
-                let duration_secs = (sample_accumulator.len() / (audio_capture.channels as usize)) as f32 / (audio_capture.sample_rate as f32);
-
-                // Stepped Evaluation: 3.0s minimum threshold
-                if duration_secs < 3.0 {
+                let samples = audio_capture.read_available().await;
+                if samples.len() < 48000 { // 3.0s minimum
                     continue;
                 }
 
-                // Convert to 16 kHz Mono PCM i16
-                let pcm_16k = AudioResampler::resample_to_16k_mono(
-                    &sample_accumulator,
-                    audio_capture.channels,
-                    audio_capture.sample_rate,
-                );
-
-                // Check silence energy
-                let (is_silent, _dbfs) = silence_detector.is_silent(&pcm_16k);
-                if is_silent {
-                    continue;
-                }
-
-                // Generate Shazam Signature
-                let signature = SignatureGenerator::make_signature_from_i16_buffer(&pcm_16k);
-                let Ok(sig_uri) = signature.encode_to_uri() else {
+                // Generate signature from PCM samples
+                let Some(sig_uri) = sig_gen.generate_from_i16(&samples) else {
+                    eprintln!("Signature generator returned None (silence/error)");
                     continue;
                 };
 
-                let sample_ms = (pcm_16k.len() as f32 / 16.0) as u32;
+                let sample_ms = (samples.len() as f32 / 16.0) as u32;
 
                 // Query Cloud API
-                if let Ok(Some(song)) = shazam_client.recognize(&sig_uri, sample_ms).await {
-                    let song_id = song.display_id();
-                    miss_count = 0;
+                match shazam_client.recognize(&sig_uri, sample_ms).await {
+                    Ok(Some(song)) => {
+                        let song_id = song.display_id();
+                        miss_count = 0;
+                        println!("Recognized: {} by {}", song.title, song.artist);
 
-                    if song_id != last_detected_id {
-                        last_detected_id = song_id.clone();
-                        history_storage.log_song(&song);
-                        emit_found(&song);
-                        let _ = fs::write(CURRENT_FILE, format!("{} - {}", song.title, song.artist));
-                        *current_song.write().await = Some(song);
+                        if song_id != last_detected_id {
+                            last_detected_id = song_id.clone();
+                            history_storage.log_song(&song);
+                            emit_found(&song);
+                            let _ = fs::write(CURRENT_FILE, format!("{} - {}", song.title, song.artist));
+                            *current_song.write().await = Some(song);
+                        }
+
+                        audio_capture.clear_buffer().await;
+                        tokio::time::sleep(Duration::from_secs(3)).await;
                     }
-
-                    // Cooldown after match, slide buffer forward
-                    sample_accumulator.clear();
-                    tokio::time::sleep(Duration::from_secs(3)).await;
-                } else {
-                    miss_count += 1;
-                    if miss_count >= 3 && !last_detected_id.is_empty() {
-                        last_detected_id.clear();
-                        *current_song.write().await = None;
-                        let _ = fs::remove_file(CURRENT_FILE);
-                        emit_listening();
+                    Ok(None) => {
+                        miss_count += 1;
+                        if miss_count >= 3 && !last_detected_id.is_empty() {
+                            last_detected_id.clear();
+                            *current_song.write().await = None;
+                            let _ = fs::remove_file(CURRENT_FILE);
+                            emit_listening();
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Shazam API error: {}", e);
                     }
                 }
             }

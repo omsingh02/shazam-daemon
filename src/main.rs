@@ -72,6 +72,7 @@ fn cleanup_files() {
     let _ = fs::remove_file(PID_FILE);
     let _ = fs::remove_file(CURRENT_FILE);
     let _ = fs::remove_file(STATE_FILE);
+    let _ = fs::remove_file(JSON_FILE);
 }
 
 fn emit_waybar_state(text: &str, tooltip: &str, class: &str) {
@@ -85,6 +86,7 @@ fn emit_waybar_state(text: &str, tooltip: &str, class: &str) {
 
 fn emit_paused() {
     let _ = fs::remove_file(STATE_FILE);
+    let _ = fs::remove_file(CURRENT_FILE);
     emit_waybar_state("󰏤", "Shazam is paused. Click to listen.", "paused");
 }
 
@@ -209,7 +211,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let shazam_client = ShazamClient::new();
     let history_storage = HistoryStorage::new();
 
-    let is_listening = Arc::new(AtomicBool::new(true)); // Start active listening immediately
+    let is_listening = Arc::new(AtomicBool::new(true)); // Start active listening
     let current_song = Arc::new(RwLock::new(None::<RecognizedSong>));
 
     // Register D-Bus MPRIS server
@@ -221,10 +223,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .build()
         .await?;
 
-    // Setup UNIX signals for toggle & cleanup
+    // Setup UNIX signals
     let mut sigusr1 = signal(SignalKind::user_defined1())?;
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
+    let mut sighup = signal(SignalKind::hangup())?;
 
     emit_listening();
 
@@ -235,6 +238,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     loop {
         tokio::select! {
+            _ = sighup.recv() => {
+                // Ignore SIGHUP
+            }
             _ = sigusr1.recv() => {
                 let current_state = is_listening.load(Ordering::Relaxed);
                 let new_state = !current_state;
@@ -250,7 +256,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     audio_capture.clear_buffer().await;
                     last_detected_id.clear();
                     *current_song.write().await = None;
-                    let _ = fs::remove_file(CURRENT_FILE);
                     emit_paused();
                 }
             }
@@ -272,7 +277,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
                 // Generate signature from PCM samples
                 let Some(sig_uri) = sig_gen.generate_from_i16(&samples) else {
-                    eprintln!("Signature generator returned None (silence/error)");
                     continue;
                 };
 
@@ -283,7 +287,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     Ok(Some(song)) => {
                         let song_id = song.display_id();
                         miss_count = 0;
-                        println!("Recognized: {} by {}", song.title, song.artist);
 
                         if song_id != last_detected_id {
                             last_detected_id = song_id.clone();
@@ -305,8 +308,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             emit_listening();
                         }
                     }
-                    Err(e) => {
-                        eprintln!("Shazam API error: {}", e);
+                    Err(_) => {
+                        // Rate limit / network error backoff
+                        tokio::time::sleep(Duration::from_secs(2)).await;
                     }
                 }
             }

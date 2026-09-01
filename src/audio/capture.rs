@@ -26,11 +26,14 @@ impl AudioCapture {
 
         let mut cmd = Command::new("pw-record");
         match mode {
-            AudioSourceMode::Monitor | AudioSourceMode::Auto => {
+            AudioSourceMode::Monitor => {
                 cmd.args(["--target", "@DEFAULT_AUDIO_SINK@.monitor"]);
             }
             AudioSourceMode::Mic => {
                 cmd.args(["--target", "@DEFAULT_AUDIO_SOURCE@"]);
+            }
+            AudioSourceMode::Auto => {
+                // Default system input (microphone / active recording device)
             }
         }
 
@@ -38,18 +41,7 @@ impl AudioCapture {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::null());
 
-        let mut child = match cmd.spawn() {
-            Ok(c) => c,
-            Err(_) => {
-                // Fallback to generic pw-record without target
-                let mut fallback_cmd = Command::new("pw-record");
-                fallback_cmd.args(["--format", "s16", "--rate", "16000", "--channels", "1", "-"]);
-                fallback_cmd.stdout(Stdio::piped());
-                fallback_cmd.stderr(Stdio::null());
-                fallback_cmd.spawn()?
-            }
-        };
-
+        let mut child = cmd.spawn()?;
         let mut stdout = child.stdout.take().ok_or("Failed to open pw-record stdout")?;
 
         tokio::spawn(async move {
@@ -90,9 +82,8 @@ impl AudioCapture {
     }
 
     pub async fn read_available(&self) -> Vec<i16> {
-        let mut lock = self.buffer.lock().await;
-        let data = lock.clone();
-        data
+        let lock = self.buffer.lock().await;
+        lock.clone()
     }
 
     pub async fn clear_buffer(&self) {

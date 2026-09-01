@@ -123,6 +123,12 @@ fn html_escape(s: &str) -> String {
         .replace('\'', "&#39;")
 }
 
+fn calculate_rms(samples: &[i16]) -> f32 {
+    if samples.is_empty() { return 0.0; }
+    let sum_sq: f64 = samples.iter().map(|&s| (s as f64) * (s as f64)).sum();
+    (sum_sq / (samples.len() as f64)).sqrt() as f32
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let cli = Cli::parse();
@@ -234,7 +240,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut last_detected_id = String::new();
     let mut miss_count = 0;
 
-    println!("Shazam high-performance daemon started.");
+    println!("Shazam high-performance daemon started (12s Ring Buffer Engine).");
 
     loop {
         tokio::select! {
@@ -275,12 +281,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     continue;
                 }
 
-                let samples = audio_capture.read_available().await;
-                if samples.len() < 48000 { // 3.0s minimum
+                // Require at least 3.0s in the ring buffer (48,000 samples)
+                if audio_capture.sample_count().await < 48000 {
                     continue;
                 }
 
-                // Generate signature from PCM samples
+                // Extract the most recent 5-second chunk from the 12-second ring buffer
+                let samples = audio_capture.extract_chunk(5).await;
+                if samples.is_empty() {
+                    continue;
+                }
+
+                // RMS Energy Gating: Skip DSP if audio is near absolute silence
+                let rms = calculate_rms(&samples);
+                if rms < 30.0 { // Below ~ -60 dBFS
+                    continue;
+                }
+
+                // Generate signature from contiguous PCM samples
                 let Some(sig_uri) = sig_gen.generate_from_i16(&samples) else {
                     continue;
                 };
@@ -306,7 +324,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             }
                         }
 
-                        audio_capture.clear_buffer().await;
+                        // Match Cooldown
                         tokio::time::sleep(Duration::from_secs(3)).await;
                     }
                     Ok(None) => {

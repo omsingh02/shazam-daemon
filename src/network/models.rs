@@ -70,6 +70,7 @@ pub struct TrackSection {
     pub section_type: Option<String>,
     pub text: Option<Vec<String>>,
     pub metadata: Option<Vec<SectionMetadata>>,
+    pub youtubeurl: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,6 +97,7 @@ pub struct RecognizedSong {
     pub cover_art_hq_url: Option<String>,
     pub offset_seconds: Option<f64>,
     pub preview_audio_url: Option<String>,
+    pub youtube_url: Option<String>,
     pub share_url: Option<String>,
     pub lyrics: Option<Vec<String>>,
 }
@@ -108,6 +110,7 @@ impl RecognizedSong {
 
         let mut album = None;
         let mut lyrics = None;
+        let mut youtube_url = None;
 
         if let Some(sections) = track.sections {
             for section in sections {
@@ -121,6 +124,16 @@ impl RecognizedSong {
                     }
                 } else if section.section_type.as_deref() == Some("LYRICS") {
                     lyrics = section.text;
+                } else if section.section_type.as_deref() == Some("VIDEO") {
+                    if let Some(yt) = section.youtubeurl {
+                        if let Some(actions) = yt.get("actions").and_then(|a| a.as_array()) {
+                            for act in actions {
+                                if let Some(uri) = act.get("uri").and_then(|u| u.as_str()) {
+                                    youtube_url = Some(uri.to_string());
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -156,6 +169,7 @@ impl RecognizedSong {
             cover_art_hq_url,
             offset_seconds,
             preview_audio_url,
+            youtube_url,
             share_url,
             lyrics,
         })

@@ -52,6 +52,7 @@ impl HistoryStorage {
                 "cover_art": song.cover_art_hq_url.as_deref().or(song.cover_art_url.as_deref()).unwrap_or(""),
                 "offset": song.offset_seconds.unwrap_or(0.0),
                 "preview_url": song.preview_audio_url.as_deref().unwrap_or(""),
+                "youtube_url": song.youtube_url.as_deref().unwrap_or(""),
                 "share_url": song.share_url.as_deref().unwrap_or("")
             });
             if let Ok(serialized) = serde_json::to_string(&json_entry) {

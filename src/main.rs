@@ -1,26 +1,35 @@
-use clap::Parser;
+mod audio;
+mod downloader;
+mod dsp;
+mod history;
+mod mpris;
+mod network;
+
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+
+use clap::Parser;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::RwLock;
 use zbus::connection::Builder;
 
-mod audio;
-mod dsp;
-mod history;
-mod network;
-mod mpris;
+use crate::audio::{AudioCapture, AudioResampler, AudioSourceMode, SilenceDetector};
+use crate::downloader::JioSaavnDownloader;
+use crate::dsp::SignatureGenerator;
+use crate::history::HistoryStorage;
+use crate::mpris::{ShazamPlayer, ShazamRoot};
+use crate::network::{RecognizedSong, ShazamClient};
 
-use audio::{AudioCapture, AudioResampler, AudioSourceMode, SilenceDetector};
-use dsp::SignatureGenerator;
-use history::HistoryStorage;
-use network::{RecognizedSong, ShazamClient};
-use mpris::{ShazamPlayer, ShazamRoot};
+const PID_FILE: &str = "/tmp/shazam-scanner.pid";
+const STATE_FILE: &str = "/tmp/waybar-shazam-state";
+const CURRENT_FILE: &str = "/tmp/waybar-shazam-current";
+const JSON_FILE: &str = "/tmp/waybar-shazam-json";
 
 #[derive(Parser, Debug)]
-#[command(name = "shazam-daemon", about = "High-performance Shazam audio recognition daemon")]
+#[command(name = "shazam-daemon", about = "High-performance Shazam audio recognition daemon and 320kbps downloader")]
 struct Cli {
     #[arg(long, help = "Run as background daemon with JSON output for Waybar / Quickshell")]
     waybar: bool,
@@ -31,20 +40,23 @@ struct Cli {
     #[arg(long, help = "Print running daemon status")]
     status: bool,
 
-    #[arg(long, default_value = "auto", help = "Audio capture source: auto, monitor, or mic")]
+    #[arg(long, help = "Audio capture source: auto, monitor, or mic", default_value = "auto")]
     source: String,
+
+    #[arg(long, help = "Download a song by title and artist directly from JioSaavn 320kbps", num_args = 2, value_names = ["TITLE", "ARTIST"])]
+    download: Option<Vec<String>>,
+
+    #[arg(long, help = "Download the currently recognized song from running daemon")]
+    download_current: bool,
 }
 
-const PID_FILE: &str = "/tmp/shazam-scanner.pid";
-const JSON_FILE: &str = "/tmp/waybar-shazam-json";
-const CURRENT_FILE: &str = "/tmp/waybar-shazam-current";
-const STATE_FILE: &str = "/tmp/waybar-shazam-state";
-
 fn read_pid() -> Option<i32> {
-    fs::read_to_string(PID_FILE)
-        .ok()
-        .and_then(|s| s.trim().parse::<i32>().ok())
-        .filter(|&pid| unsafe { libc::kill(pid, 0) == 0 })
+    if Path::new(PID_FILE).exists() {
+        let content = fs::read_to_string(PID_FILE).ok()?;
+        content.trim().parse::<i32>().ok()
+    } else {
+        None
+    }
 }
 
 fn write_pid() {
@@ -108,6 +120,50 @@ fn html_escape(s: &str) -> String {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let cli = Cli::parse();
+
+    if let Some(args) = cli.download {
+        let title = &args[0];
+        let artist = &args[1];
+        let downloader = JioSaavnDownloader::new();
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+        let download_dir = PathBuf::from(home).join("Music").join("ShazamLive");
+
+        println!("Downloading: {} - {} (320kbps AAC)...", title, artist);
+        match downloader.download_song(title, artist, download_dir).await {
+            Ok(p) => {
+                println!("Saved to: {}", p.display());
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("Download error: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    if cli.download_current {
+        let current_text = fs::read_to_string(CURRENT_FILE).unwrap_or_default();
+        if let Some((title, artist)) = current_text.split_once(" - ") {
+            let downloader = JioSaavnDownloader::new();
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+            let download_dir = PathBuf::from(home).join("Music").join("ShazamLive");
+
+            println!("Downloading current track: {} - {} (320kbps AAC)...", title, artist);
+            match downloader.download_song(title.trim(), artist.trim(), download_dir).await {
+                Ok(p) => {
+                    println!("Saved to: {}", p.display());
+                    return Ok(());
+                }
+                Err(e) => {
+                    eprintln!("Download error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            eprintln!("No song is currently recognized.");
+            std::process::exit(1);
+        }
+    }
 
     if cli.toggle {
         if let Some(pid) = read_pid() {

@@ -1,10 +1,12 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use zbus::interface;
 use zbus::zvariant::Value;
 
+use crate::downloader::JioSaavnDownloader;
 use crate::network::models::RecognizedSong;
 
 pub struct ShazamRoot;
@@ -48,6 +50,7 @@ impl ShazamRoot {
 pub struct ShazamPlayer {
     is_listening: Arc<AtomicBool>,
     current_song: Arc<RwLock<Option<RecognizedSong>>>,
+    downloader: Arc<JioSaavnDownloader>,
 }
 
 impl ShazamPlayer {
@@ -58,6 +61,7 @@ impl ShazamPlayer {
         Self {
             is_listening,
             current_song,
+            downloader: Arc::new(JioSaavnDownloader::new()),
         }
     }
 }
@@ -156,5 +160,39 @@ impl ShazamPlayer {
 
     async fn stop(&self) {
         self.is_listening.store(false, Ordering::Relaxed);
+    }
+
+    // Custom Extension D-Bus methods
+    async fn download_current(&self) -> String {
+        let (title, artist) = {
+            let guard = self.current_song.read().await;
+            match guard.as_ref() {
+                Some(s) => (s.title.clone(), s.artist.clone()),
+                None => return "Error: No song currently recognized".to_string(),
+            }
+        };
+
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+        let download_dir = PathBuf::from(home).join("Music").join("ShazamLive");
+
+        match self.downloader.download_song(&title, &artist, download_dir).await {
+            Ok(p) => format!("Success: Downloaded to {}", p.display()),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    async fn download_track(&self, title: String, artist: String) -> String {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+        let download_dir = PathBuf::from(home).join("Music").join("ShazamLive");
+
+        match self.downloader.download_song(&title, &artist, download_dir).await {
+            Ok(p) => format!("Success: Downloaded to {}", p.display()),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    async fn get_preview_url(&self) -> String {
+        let guard = self.current_song.read().await;
+        guard.as_ref().and_then(|s| s.preview_audio_url.clone()).unwrap_or_default()
     }
 }

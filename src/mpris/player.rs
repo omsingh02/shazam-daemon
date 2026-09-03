@@ -117,6 +117,7 @@ impl ShazamPlayer {
                 song.shazam_key.as_deref().unwrap_or("0")
             );
             map.insert("mpris:trackid".into(), Value::from(track_id));
+            map.insert("shazam:engineStatus".into(), Value::from(self.engine_status.read().await.clone()));
             map.insert("xesam:title".into(), Value::from(song.title.clone()));
             map.insert("xesam:artist".into(), Value::from(vec![song.artist.clone()]));
 
@@ -146,6 +147,7 @@ impl ShazamPlayer {
                 map.insert("shazam:shareUrl".into(), Value::from(share.clone()));
             }
         } else {
+            map.insert("shazam:engineStatus".into(), Value::from(self.engine_status.read().await.clone()));
             map.insert(
                 "mpris:trackid".into(),
                 Value::from("/org/mpris/MediaPlayer2/Track/none".to_string()),

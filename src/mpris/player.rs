@@ -161,24 +161,27 @@ impl ShazamPlayer {
     }
 
     async fn play(&self) {
-        self.is_listening.store(true, Ordering::Relaxed);
-        *self.engine_status.write().await = "ambient".to_string();
+        if !self.is_listening.load(Ordering::Relaxed) {
+            unsafe { libc::kill(libc::getpid(), libc::SIGUSR1); }
+        }
     }
 
     async fn pause(&self) {
-        self.is_listening.store(false, Ordering::Relaxed);
-        *self.engine_status.write().await = "paused".to_string();
+        if self.is_listening.load(Ordering::Relaxed) {
+            unsafe { libc::kill(libc::getpid(), libc::SIGUSR1); }
+        }
     }
 
     async fn play_pause(&self) {
-        let current = self.is_listening.load(Ordering::Relaxed);
-        self.is_listening.store(!current, Ordering::Relaxed);
-        *self.engine_status.write().await = if !current { "ambient".into() } else { "paused".into() };
+        unsafe {
+            libc::kill(libc::getpid(), libc::SIGUSR1);
+        }
     }
 
     async fn stop(&self) {
-        self.is_listening.store(false, Ordering::Relaxed);
-        *self.engine_status.write().await = "paused".to_string();
+        if self.is_listening.load(Ordering::Relaxed) {
+            unsafe { libc::kill(libc::getpid(), libc::SIGUSR1); }
+        }
     }
 
     async fn download_current(&self) -> String {

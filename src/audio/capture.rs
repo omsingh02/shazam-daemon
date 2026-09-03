@@ -95,18 +95,16 @@ impl AudioCapture {
             while !shutdown_clone.load(Ordering::Relaxed) {
                 let mut cmd = Command::new("pw-record");
                 match mode {
-                    AudioSourceMode::Monitor => {
-                        cmd.args(["--target", "@DEFAULT_AUDIO_SINK@.monitor"]);
+                    AudioSourceMode::Monitor | AudioSourceMode::Auto => {
+                        cmd.args(["-P", "stream.capture.sink=true"]);
                     }
                     AudioSourceMode::Mic => {
                         cmd.args(["--target", "@DEFAULT_AUDIO_SOURCE@"]);
                     }
-                    AudioSourceMode::Auto => {
-                        // Captures default system audio input (mic / active recording stream)
-                    }
                 }
 
                 cmd.args(["--format", "s16", "--rate", "16000", "--channels", "1", "-"]);
+                cmd.kill_on_drop(true);
                 cmd.stdout(Stdio::piped());
                 cmd.stderr(Stdio::null());
 

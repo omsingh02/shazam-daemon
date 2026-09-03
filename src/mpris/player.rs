@@ -49,6 +49,7 @@ impl ShazamRoot {
 
 pub struct ShazamPlayer {
     is_listening: Arc<AtomicBool>,
+    engine_status: Arc<RwLock<String>>,
     current_song: Arc<RwLock<Option<RecognizedSong>>>,
     downloader: Arc<JioSaavnDownloader>,
 }
@@ -56,10 +57,12 @@ pub struct ShazamPlayer {
 impl ShazamPlayer {
     pub fn new(
         is_listening: Arc<AtomicBool>,
+        engine_status: Arc<RwLock<String>>,
         current_song: Arc<RwLock<Option<RecognizedSong>>>,
     ) -> Self {
         Self {
             is_listening,
+            engine_status,
             current_song,
             downloader: Arc::new(JioSaavnDownloader::new()),
         }
@@ -70,11 +73,17 @@ impl ShazamPlayer {
 impl ShazamPlayer {
     #[zbus(property)]
     async fn playback_status(&self) -> String {
-        if self.is_listening.load(Ordering::Relaxed) {
+        let song_guard = self.current_song.read().await;
+        if song_guard.is_some() {
             "Playing".to_string()
         } else {
             "Paused".to_string()
         }
+    }
+
+    #[zbus(property)]
+    async fn engine_status(&self) -> String {
+        self.engine_status.read().await.clone()
     }
 
     #[zbus(property)]
@@ -130,15 +139,16 @@ impl ShazamPlayer {
             if let Some(preview) = &song.preview_audio_url {
                 map.insert("shazam:previewUrl".into(), Value::from(preview.clone()));
             }
+            if let Some(yt) = &song.youtube_url {
+                map.insert("shazam:youtubeUrl".into(), Value::from(yt.clone()));
+            }
+            if let Some(share) = &song.share_url {
+                map.insert("shazam:shareUrl".into(), Value::from(share.clone()));
+            }
         } else {
             map.insert(
                 "mpris:trackid".into(),
                 Value::from("/org/mpris/MediaPlayer2/Track/none".to_string()),
-            );
-            map.insert("xesam:title".into(), Value::from("Shazam Active".to_string()));
-            map.insert(
-                "xesam:artist".into(),
-                Value::from(vec!["Listening...".to_string()]),
             );
         }
 
@@ -147,22 +157,25 @@ impl ShazamPlayer {
 
     async fn play(&self) {
         self.is_listening.store(true, Ordering::Relaxed);
+        *self.engine_status.write().await = "ambient".to_string();
     }
 
     async fn pause(&self) {
         self.is_listening.store(false, Ordering::Relaxed);
+        *self.engine_status.write().await = "paused".to_string();
     }
 
     async fn play_pause(&self) {
         let current = self.is_listening.load(Ordering::Relaxed);
         self.is_listening.store(!current, Ordering::Relaxed);
+        *self.engine_status.write().await = if !current { "ambient".into() } else { "paused".into() };
     }
 
     async fn stop(&self) {
         self.is_listening.store(false, Ordering::Relaxed);
+        *self.engine_status.write().await = "paused".to_string();
     }
 
-    // Custom Extension D-Bus methods
     async fn download_current(&self) -> String {
         let (title, artist) = {
             let guard = self.current_song.read().await;
@@ -194,5 +207,36 @@ impl ShazamPlayer {
     async fn get_preview_url(&self) -> String {
         let guard = self.current_song.read().await;
         guard.as_ref().and_then(|s| s.preview_audio_url.clone()).unwrap_or_default()
+    }
+
+    async fn get_recent_history(&self, limit: u32) -> String {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+        let hist_path = PathBuf::from(home).join(".local/share/shazam_history.jsonl");
+        if !hist_path.exists() {
+            return "[]".to_string();
+        }
+        let content = match tokio::fs::read_to_string(&hist_path).await {
+            Ok(c) => c,
+            Err(_) => return "[]".to_string(),
+        };
+        let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+        let take_count = (limit as usize).min(lines.len());
+        let slice = &lines[lines.len() - take_count..];
+        let mut items = Vec::new();
+        for l in slice.iter().rev() {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(l) {
+                items.push(v);
+            }
+        }
+        serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_string())
+    }
+
+    async fn clear_history(&self) -> bool {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+        let hist_jsonl = PathBuf::from(home.clone()).join(".local/share/shazam_history.jsonl");
+        let hist_txt = PathBuf::from(home).join(".local/share/shazam_history.txt");
+        let _ = tokio::fs::remove_file(hist_jsonl).await;
+        let _ = tokio::fs::remove_file(hist_txt).await;
+        true
     }
 }

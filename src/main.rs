@@ -85,7 +85,7 @@ fn emit_waybar_state(text: &str, tooltip: &str, class: &str) {
 }
 
 fn emit_paused() {
-    let _ = fs::remove_file(STATE_FILE);
+    let _ = fs::write(STATE_FILE, "paused");
     let _ = fs::remove_file(CURRENT_FILE);
     emit_waybar_state("󰏤", "Shazam is paused. Click to listen.", "paused");
 }
@@ -93,6 +93,11 @@ fn emit_paused() {
 fn emit_listening() {
     let _ = fs::write(STATE_FILE, "active");
     emit_waybar_state("󰓅", "Shazam is listening (ambient)...", "ambient");
+}
+
+fn emit_offline() {
+    let _ = fs::write(STATE_FILE, "offline");
+    emit_waybar_state("󰖪", "Shazam: Network unreachable", "offline");
 }
 
 fn emit_found(song: &RecognizedSong) {
@@ -218,10 +223,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let history_storage = HistoryStorage::new();
 
     let is_listening = Arc::new(AtomicBool::new(true)); // Start active listening
+    let engine_status = Arc::new(RwLock::new("ambient".to_string()));
     let current_song = Arc::new(RwLock::new(None::<RecognizedSong>));
 
     // Register D-Bus MPRIS server
-    let player_service = ShazamPlayer::new(is_listening.clone(), current_song.clone());
+    let player_service = ShazamPlayer::new(is_listening.clone(), engine_status.clone(), current_song.clone());
     let dbus_conn = Builder::session()?
         .name("org.mpris.MediaPlayer2.Shazam")?
         .serve_at("/org/mpris/MediaPlayer2", ShazamRoot)?
@@ -256,18 +262,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     audio_capture.clear_buffer().await;
                     last_detected_id.clear();
                     audio_capture.resume();
+                    *engine_status.write().await = "ambient".to_string();
                     emit_listening();
                 } else {
                     audio_capture.pause();
                     audio_capture.clear_buffer().await;
                     last_detected_id.clear();
                     *current_song.write().await = None;
+                    *engine_status.write().await = "paused".to_string();
                     emit_paused();
                 }
 
                 if let Ok(iface_ref) = dbus_conn.object_server().interface::<_, ShazamPlayer>("/org/mpris/MediaPlayer2").await {
                     let _ = iface_ref.get().await.playback_status_changed(iface_ref.signal_emitter()).await;
                     let _ = iface_ref.get().await.metadata_changed(iface_ref.signal_emitter()).await;
+                    let _ = iface_ref.get().await.engine_status_changed(iface_ref.signal_emitter()).await;
                 }
             }
             _ = sigterm.recv() => {
@@ -317,8 +326,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             emit_found(&song);
                             let _ = fs::write(CURRENT_FILE, format!("{} - {}", song.title, song.artist));
                             *current_song.write().await = Some(song);
+                            *engine_status.write().await = "found".to_string();
 
                             if let Ok(iface_ref) = dbus_conn.object_server().interface::<_, ShazamPlayer>("/org/mpris/MediaPlayer2").await {
+                                let _ = iface_ref.get().await.engine_status_changed(iface_ref.signal_emitter()).await;
                                 let _ = iface_ref.get().await.metadata_changed(iface_ref.signal_emitter()).await;
                                 let _ = iface_ref.get().await.playback_status_changed(iface_ref.signal_emitter()).await;
                             }
@@ -332,16 +343,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         if miss_count >= 3 && !last_detected_id.is_empty() {
                             last_detected_id.clear();
                             *current_song.write().await = None;
+                            *engine_status.write().await = "ambient".to_string();
                             let _ = fs::remove_file(CURRENT_FILE);
                             emit_listening();
 
                             if let Ok(iface_ref) = dbus_conn.object_server().interface::<_, ShazamPlayer>("/org/mpris/MediaPlayer2").await {
+                                let _ = iface_ref.get().await.engine_status_changed(iface_ref.signal_emitter()).await;
                                 let _ = iface_ref.get().await.metadata_changed(iface_ref.signal_emitter()).await;
+                                let _ = iface_ref.get().await.playback_status_changed(iface_ref.signal_emitter()).await;
+                            }
+                        } else if last_detected_id.is_empty() {
+                            let mut status_lock = engine_status.write().await;
+                            if *status_lock == "offline" {
+                                *status_lock = "ambient".to_string();
+                                emit_listening();
+                                if let Ok(iface_ref) = dbus_conn.object_server().interface::<_, ShazamPlayer>("/org/mpris/MediaPlayer2").await {
+                                    let _ = iface_ref.get().await.engine_status_changed(iface_ref.signal_emitter()).await;
+                                }
                             }
                         }
                     }
                     Err(_) => {
                         // Rate limit / network error backoff
+                        let mut status_lock = engine_status.write().await;
+                        if *status_lock != "offline" {
+                            *status_lock = "offline".to_string();
+                            emit_offline();
+                            if let Ok(iface_ref) = dbus_conn.object_server().interface::<_, ShazamPlayer>("/org/mpris/MediaPlayer2").await {
+                                let _ = iface_ref.get().await.engine_status_changed(iface_ref.signal_emitter()).await;
+                            }
+                        }
                         tokio::time::sleep(Duration::from_secs(2)).await;
                     }
                 }

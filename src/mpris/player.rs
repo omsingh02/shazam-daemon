@@ -102,7 +102,22 @@ impl ShazamPlayer {
     }
 
     #[zbus(property)]
+    async fn position(&self) -> i64 {
+        0
+    }
+
+    #[zbus(property)]
     async fn can_seek(&self) -> bool {
+        false
+    }
+
+    #[zbus(property)]
+    async fn can_go_next(&self) -> bool {
+        false
+    }
+
+    #[zbus(property)]
+    async fn can_go_previous(&self) -> bool {
         false
     }
 

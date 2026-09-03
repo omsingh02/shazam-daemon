@@ -146,6 +146,9 @@ impl ShazamPlayer {
             if let Some(share) = &song.share_url {
                 map.insert("shazam:shareUrl".into(), Value::from(share.clone()));
             }
+            if let Some(lyrics) = &song.lyrics {
+                map.insert("shazam:lyrics".into(), Value::from(lyrics.join("\n")));
+            }
         } else {
             map.insert("shazam:engineStatus".into(), Value::from(self.engine_status.read().await.clone()));
             map.insert(
@@ -240,5 +243,38 @@ impl ShazamPlayer {
         let _ = tokio::fs::remove_file(hist_jsonl).await;
         let _ = tokio::fs::remove_file(hist_txt).await;
         true
+    }
+
+    async fn search_history(&self, query: String) -> String {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+        let hist_path = PathBuf::from(home).join(".local/share/shazam_history.jsonl");
+        if !hist_path.exists() {
+            return "[]".to_string();
+        }
+        let content = match tokio::fs::read_to_string(&hist_path).await {
+            Ok(c) => c,
+            Err(_) => return "[]".to_string(),
+        };
+        let q = query.trim().to_lowercase();
+        let items: Vec<serde_json::Value> = content
+            .lines()
+            .rev()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter(|item| {
+                if q.is_empty() {
+                    return true;
+                }
+                let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                let artist = item.get("artist").and_then(|v| v.as_str()).unwrap_or("");
+                let album = item.get("album").and_then(|v| v.as_str()).unwrap_or("");
+                let genre = item.get("genre").and_then(|v| v.as_str()).unwrap_or("");
+                title.to_lowercase().contains(&q)
+                    || artist.to_lowercase().contains(&q)
+                    || album.to_lowercase().contains(&q)
+                    || genre.to_lowercase().contains(&q)
+            })
+            .take(100)
+            .collect();
+        serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_string())
     }
 }

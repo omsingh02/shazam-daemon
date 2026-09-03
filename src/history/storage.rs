@@ -53,7 +53,8 @@ impl HistoryStorage {
                 "offset": song.offset_seconds.unwrap_or(0.0),
                 "preview_url": song.preview_audio_url.as_deref().unwrap_or(""),
                 "youtube_url": song.youtube_url.as_deref().unwrap_or(""),
-                "share_url": song.share_url.as_deref().unwrap_or("")
+                "share_url": song.share_url.as_deref().unwrap_or(""),
+                "lyrics": song.lyrics.as_deref().unwrap_or(&[])
             });
             if let Ok(serialized) = serde_json::to_string(&json_entry) {
                 let _ = writeln!(file, "{}", serialized);
@@ -78,6 +79,41 @@ impl HistoryStorage {
             .into_iter()
             .take(limit)
             .filter_map(|l| serde_json::from_str(&l).ok())
+            .collect()
+    }
+
+    pub fn search(&self, query: &str) -> Vec<serde_json::Value> {
+        let q = query.trim().to_lowercase();
+        if q.is_empty() {
+            return self.get_recent(50);
+        }
+
+        if !self.jsonl_path.exists() {
+            return Vec::new();
+        }
+
+        let Ok(file) = OpenOptions::new().read(true).open(&self.jsonl_path) else {
+            return Vec::new();
+        };
+
+        let reader = BufReader::new(file);
+        let mut lines: Vec<String> = reader.lines().filter_map(|l| l.ok()).collect();
+        lines.reverse();
+
+        lines
+            .into_iter()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(&l).ok())
+            .filter(|item| {
+                let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                let artist = item.get("artist").and_then(|v| v.as_str()).unwrap_or("");
+                let album = item.get("album").and_then(|v| v.as_str()).unwrap_or("");
+                let genre = item.get("genre").and_then(|v| v.as_str()).unwrap_or("");
+                title.to_lowercase().contains(&q)
+                    || artist.to_lowercase().contains(&q)
+                    || album.to_lowercase().contains(&q)
+                    || genre.to_lowercase().contains(&q)
+            })
+            .take(50)
             .collect()
     }
 }

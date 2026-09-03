@@ -6,7 +6,7 @@ pub struct SilenceDetector {
 impl Default for SilenceDetector {
     fn default() -> Self {
         Self {
-            threshold_dbfs: -45.0, // Standard silence threshold
+            threshold_dbfs: -55.0, // Calibrated threshold for ambient microphone & room audio
         }
     }
 }

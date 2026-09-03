@@ -16,7 +16,7 @@ use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::RwLock;
 use zbus::connection::Builder;
 
-use crate::audio::{AudioCapture, AudioSourceMode};
+use crate::audio::{AudioCapture, AudioSourceMode, SilenceDetector};
 use crate::downloader::JioSaavnDownloader;
 use crate::dsp::SignatureGenerator;
 use crate::history::HistoryStorage;
@@ -128,11 +128,6 @@ fn html_escape(s: &str) -> String {
         .replace('\'', "&#39;")
 }
 
-fn calculate_rms(samples: &[i16]) -> f32 {
-    if samples.is_empty() { return 0.0; }
-    let sum_sq: f64 = samples.iter().map(|&s| (s as f64) * (s as f64)).sum();
-    (sum_sq / (samples.len() as f64)).sqrt() as f32
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -221,6 +216,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let sig_gen = SignatureGenerator::new();
     let shazam_client = ShazamClient::new();
     let history_storage = HistoryStorage::new();
+    let silence_detector = SilenceDetector::default();
 
     let is_listening = Arc::new(AtomicBool::new(true)); // Start active listening
     let engine_status = Arc::new(RwLock::new("ambient".to_string()));
@@ -259,14 +255,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 is_listening.store(new_state, Ordering::Relaxed);
 
                 if new_state {
-                    audio_capture.clear_buffer().await;
+                    audio_capture.clear_buffer();
                     last_detected_id.clear();
                     audio_capture.resume();
                     *engine_status.write().await = "ambient".to_string();
                     emit_listening();
                 } else {
                     audio_capture.pause();
-                    audio_capture.clear_buffer().await;
+                    audio_capture.clear_buffer();
                     last_detected_id.clear();
                     *current_song.write().await = None;
                     *engine_status.write().await = "paused".to_string();
@@ -291,19 +287,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 }
 
                 // Require at least 3.0s in the ring buffer (48,000 samples)
-                if audio_capture.sample_count().await < 48000 {
+                if audio_capture.sample_count() < 48000 {
                     continue;
                 }
 
                 // Extract the most recent 5-second chunk from the 12-second ring buffer
-                let samples = audio_capture.extract_chunk(5).await;
+                let samples = audio_capture.extract_chunk(5);
                 if samples.is_empty() {
                     continue;
                 }
 
-                // RMS Energy Gating: Skip DSP if audio is near absolute silence
-                let rms = calculate_rms(&samples);
-                if rms < 30.0 { // Below ~ -60 dBFS
+                // Energy Gating: Skip DSP if audio is silent
+                let (is_silent, _dbfs) = silence_detector.is_silent(&samples);
+                if is_silent {
                     continue;
                 }
 
